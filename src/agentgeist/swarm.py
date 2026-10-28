@@ -10,8 +10,8 @@ from crewai.llms.base_llm import BaseLLM
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from .budget import Ledger
-from .connections import Partners, with_retries
+from .budget import BudgetExceeded, Ledger
+from .connections import Partners, describe_error, with_retries
 from .contracts import Decision, Tick, safety_floor
 from .trace import Trace
 
@@ -78,14 +78,27 @@ def cosine(a, b):
 def sensor_intel(sectors, partners):
     signatures = [f"EMF {s['sensors']['emf_milligauss']} milligauss, temperature {s['sensors']['temp_c']} C, "
                   f"motion {s['sensors']['motion_events']}" for s in sectors]
-    vectors = partners.embeddings(["High EMF, freezing temperature, repeated motion: anomalous signature",
-                                   "Low EMF, room temperature, human crowd motion: normal signature"] + signatures)
+    try:
+        vectors = partners.embeddings(["High EMF, freezing temperature, repeated motion: anomalous signature",
+                                       "Low EMF, room temperature, human crowd motion: normal signature"] + signatures)
+    except BudgetExceeded:
+        raise  # a deliberate stop, handled as a budget fallback upstream
+    except Exception as exc:
+        # Similarities are weak hints; the physical indicators need no network. Decide without them
+        # rather than fail a scored tick on an overloaded embeddings engine (retries already ran).
+        if partners.trace:
+            partners.trace.record_degraded("Parasail embeddings", describe_error(exc))
+        vectors = None
+
+    def similarity(i, reference):
+        return round(cosine(vectors[i + 2], vectors[reference]), 4) if vectors else None
+
     return [{"sector": s["sector"], "sensors": s["sensors"],
              "physical_indicators": sum((s["sensors"]["emf_milligauss"] >= 60,
                                           s["sensors"]["temp_c"] <= 5,
                                           s["sensors"]["motion_events"] >= 10)),
-             "anomaly_similarity": round(cosine(vectors[i+2], vectors[0]), 4),
-             "normal_similarity": round(cosine(vectors[i+2], vectors[1]), 4)} for i, s in enumerate(sectors)]
+             "anomaly_similarity": similarity(i, 0),
+             "normal_similarity": similarity(i, 1)} for i, s in enumerate(sectors)]
 
 
 def compact(value):
@@ -108,10 +121,11 @@ SPECIALISTS = [
     ("Sensor analyst", "Report physical anomalies",
      "Each tick you get rows [sector, emf_mG, temp_C, motion_events, indicators, anomaly_sim, normal_sim]. "
      "indicators counts EMF>=60, temp<=5 and motion>=10 (0-3). A physical anomaly needs indicators>=2; "
-     "motion alone is crowd activity. The two similarities are weak hints only. "
+     "motion alone is crowd activity. The two similarities are weak hints only; null means unavailable. "
      "Example line: main_stage: normal; indicators 1/3; EMF 3, 21C, motion 41.",
      lambda ev: [[s["sector"], s["sensors"]["emf_milligauss"], s["sensors"]["temp_c"], s["sensors"]["motion_events"],
-                  s["physical_indicators"], round(s["anomaly_similarity"], 2), round(s["normal_similarity"], 2)]
+                  s["physical_indicators"], *[None if s[k] is None else round(s[k], 2)
+                                              for k in ("anomaly_similarity", "normal_similarity")]]
                  for s in ev]),
     ("Sighting researcher", "Separate lore from corroborated sightings",
      "Each tick you get {sightings: rows [sector, entity_class, confidence, witnesses] or [sector, null], "
@@ -211,7 +225,8 @@ def run_swarm(tick: Tick, ledger: Ledger):
         floor = safety_floor(tick)
         final = proposed if proposed.action == floor.action else floor
         priority = [s["sector"] for s in sorted(evidence["sensor_signatures"],
-                    key=lambda s: (s["physical_indicators"], s["anomaly_similarity"] - s["normal_similarity"]), reverse=True)]
+                    key=lambda s: (s["physical_indicators"], (s["anomaly_similarity"] or 0) - (s["normal_similarity"] or 0)),
+                    reverse=True)]
         trace.event("decision", proposed=proposed.model_dump(), final=final.model_dump(),
                     supervisor_override=not model_decision_valid or proposed.action != final.action,
                     model_decision_valid=model_decision_valid, credits_reserved=ledger.spent)
@@ -224,8 +239,9 @@ def run_swarm(tick: Tick, ledger: Ledger):
         result["log_dir"] = trace.save_run(tick, result, evidence_by_role())
         return result
     except Exception as exc:
-        trace.event("error", type=type(exc).__name__)  # type only: HTTP errors can carry credentials
-        trace.save_run(tick, evidence=evidence_by_role(), error=type(exc).__name__)
+        error = describe_error(exc)  # never str(exc): HTTP errors can carry credentials
+        trace.event("error", **error)
+        trace.save_run(tick, evidence=evidence_by_role(), error=error)
         raise
     finally:
         partners.close()

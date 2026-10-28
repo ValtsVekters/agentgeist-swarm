@@ -35,6 +35,16 @@ def pretty_data(prompt):
         return data, ""
 
 
+def describe(error):
+    """One line from connections.describe_error's dict, e.g. `HTTPStatusError` HTTP 429 from Parasail: overloaded."""
+    if not isinstance(error, dict):
+        return f"`{error}`"
+    text = f"`{error.get('type')}`"
+    if "status" in error:
+        text += f" HTTP {error['status']}" + (f" from {error['service']}" if "service" in error else "")
+    return text + (f": {error['reason']}" if "reason" in error else "")
+
+
 class Trace:
     def __init__(self, tick_id):
         self.path = os.getenv("AGENTGEIST_TRACE", "").strip()
@@ -44,6 +54,7 @@ class Trace:
         self.start = time.monotonic()
         self.calls = []
         self.retries = []
+        self.degraded = []
         self.lock = threading.Lock()  # specialists write from parallel threads
         if self.path:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +85,12 @@ class Trace:
         with self.lock:
             self.retries.append(retry)
         self.event("retry", **{k: v for k, v in retry.items() if k != "t"})
+
+    def record_degraded(self, service, error):
+        """A partner failed after its retries and the swarm continued without it."""
+        with self.lock:
+            self.degraded.append({"service": service, "error": error, "t": round(time.monotonic() - self.start, 2)})
+        self.event("degraded", service=service, **{k: v for k, v in error.items() if k != "service"})
 
     def save_run(self, tick, result=None, evidence=None, error=None):
         """Write logs/<time>_tick-<id>/ and return its path, or None when disabled."""
@@ -115,7 +132,9 @@ class Trace:
         lines = [f"# Tick {self.tick_id} — {self.started}", "",
                  f"Sectors: {', '.join(s.sector for s in tick.sector_reports)}", ""]
         if error:
-            lines += [f"**Stopped with an error:** `{error}`", ""]
+            lines += [f"**Stopped with an error:** {describe(error)}", ""]
+        for d in self.degraded:
+            lines += [f"**Continued without {d['service']}** (+{d['t']}s): {describe(d['error'])}", ""]
         if result:
             final, proposed = result["decision"], result["proposed"]
             lines += [f"## Decision: **{final['action'].upper()}**", "", f"> {final['rationale']}", "",

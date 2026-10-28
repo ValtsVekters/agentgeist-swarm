@@ -88,6 +88,38 @@ def retry_delay(attempt, headers=None):
     return min(hinted, MAX_RETRY_AFTER) if hinted is not None and hinted >= 0 else RETRY_DELAYS[attempt]
 
 
+SERVICES = {"api.parasail.io": "Parasail", "ydc-index.io": "You.com", "api.you.com": "You.com scenario feed",
+            "discord.com": "Discord", "api.withone.ai": "One"}
+
+
+def describe_error(exc):
+    """Safe failure details for logs: type, HTTP status, service and the provider's short message.
+    Never str(exc): HTTP library messages include full URLs, and a webhook URL is a credential."""
+    info = {"type": type(exc).__name__}
+    seen, cause = set(), exc
+    while cause is not None and id(cause) not in seen:  # CrewAI and our callers wrap the HTTP error
+        seen.add(id(cause))
+        response = getattr(cause, "response", None)
+        status = getattr(cause, "status_code", None) or getattr(response, "status_code", None)
+        if isinstance(status, int):
+            info["status"] = status
+            try:
+                host = response.request.url.host
+                info["service"] = SERVICES.get(host, host)
+            except Exception:
+                pass
+            try:
+                message = response.json().get("error", {})
+                message = message.get("message") if isinstance(message, dict) else message
+                if isinstance(message, str):
+                    info["reason"] = message[:120]
+            except Exception:
+                pass
+            break
+        cause = cause.__cause__ or cause.__context__
+    return info
+
+
 def with_retries(call, on_retry=None, sleep=time.sleep):
     """Run call(), retrying rate limits and transient upstream errors. Refused requests are not billed,
     so callers reserve credits once. Timeouts are not retried: one attempt can already take 25-35 s."""

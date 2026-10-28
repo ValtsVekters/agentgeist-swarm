@@ -6,10 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from agentgeist.budget import BudgetExceeded, Ledger
-from agentgeist.connections import Partners, decode_tool, one_env, with_retries
+from agentgeist.connections import Partners, decode_tool, describe_error, one_env, with_retries
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
 from agentgeist.store import Store, process_lock
-from agentgeist.trace import Trace, record_outcome
+from agentgeist.swarm import SPECIALISTS, sensor_intel
+from agentgeist.trace import Trace, describe, record_outcome
 
 
 def fixture(name="outbreak-level-5"):
@@ -107,6 +108,60 @@ def test_partner_http_retries_429_then_succeeds(monkeypatch):
     partners = Partners(Ledger(8, 10_000))
     partners.client = httpx.Client(transport=httpx.MockTransport(lambda request: next(responses)))
     assert partners.embeddings(["x"]) == [[1.0]]
+
+
+def http_error(status, url, body):
+    request = httpx.Request("POST", url)
+    response = httpx.Response(status, json=body, request=request)
+    return httpx.HTTPStatusError(f"{status} for url {url}", request=request, response=response)
+
+
+def test_describe_error_gives_status_service_reason_but_never_the_url():
+    secret = "https://discord.com/api/webhooks/1/SECRET-TOKEN"
+    info = describe_error(http_error(404, secret, {"message": "Unknown Webhook"}))
+    assert info == {"type": "HTTPStatusError", "status": 404, "service": "Discord"}
+    assert "SECRET" not in json.dumps(info)
+    overloaded = http_error(429, "https://api.parasail.io/v1/embeddings",
+                            {"error": {"message": "The engine is currently overloaded. Please try again later."}})
+    assert describe_error(overloaded) == {"type": "HTTPStatusError", "status": 429, "service": "Parasail",
+                                          "reason": "The engine is currently overloaded. Please try again later."}
+
+
+def test_describe_error_finds_the_status_inside_a_wrapped_error():
+    try:
+        try:
+            raise http_error(503, "https://ydc-index.io/v1/search", {})
+        except httpx.HTTPStatusError as inner:
+            raise RuntimeError("Missing specialist tool evidence") from inner
+    except RuntimeError as outer:
+        info = describe_error(outer)
+    assert info["type"] == "RuntimeError" and info["status"] == 503 and info["service"] == "You.com"
+    assert describe(info) == "`RuntimeError` HTTP 503 from You.com"
+
+
+class DownEmbeddings:
+    def __init__(self, error, trace=None):
+        self.error, self.trace = error, trace
+
+    def embeddings(self, texts):
+        raise self.error
+
+
+def test_sensor_intel_continues_without_embeddings(monkeypatch):
+    monkeypatch.delenv("AGENTGEIST_TRACE", raising=False)
+    trace = Trace(142)
+    sectors = [{"sector": "bar", "sensors": {"emf_milligauss": 98, "temp_c": -4, "motion_events": 17}}]
+    overloaded = http_error(429, "https://api.parasail.io/v1/embeddings", {"error": {"message": "overloaded"}})
+    (row,) = sensor_intel(sectors, DownEmbeddings(overloaded, trace))
+    assert row["physical_indicators"] == 3 and row["anomaly_similarity"] is None and row["normal_similarity"] is None
+    assert SPECIALISTS[0][3]([row])[0][-2:] == [None, None]
+    assert trace.degraded[0]["service"] == "Parasail embeddings" and trace.degraded[0]["error"]["status"] == 429
+
+
+def test_sensor_intel_still_stops_on_budget():
+    sectors = [{"sector": "bar", "sensors": {"emf_milligauss": 1, "temp_c": 20, "motion_events": 0}}]
+    with pytest.raises(BudgetExceeded):
+        sensor_intel(sectors, DownEmbeddings(BudgetExceeded("over")))
 
 
 def test_team_normalization():

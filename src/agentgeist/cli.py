@@ -118,7 +118,10 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
             cause = cause.__cause__ or cause.__context__
         if not budget_failure:
             store.status(team, tick.tick_id, "failed")
-            emit("tick_failed", tick_id=tick.tick_id, error=type(exc).__name__, resolution="Use resolve to retry or abandon")
+            from .connections import describe_error
+            emit("tick_failed", tick_id=tick.tick_id, error=type(exc).__name__,
+                 **{k: v for k, v in describe_error(exc).items() if k != "type"},
+                 resolution="Use resolve to retry or abandon")
             raise
         result = {"decision": safety_floor(tick).model_dump(), "mode": "budget_fallback",
                   "model_decision_valid": False, "evidence": {}, "peak_active_agents": ledger.peak,

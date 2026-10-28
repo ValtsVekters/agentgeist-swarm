@@ -42,8 +42,12 @@ def render(e):
                 f"{e['credits_reserved']} credits total)\n{wrap('why: ' + f['rationale'], '      ')}")
     if kind == "retry":
         return f"{head}  RETRY {e['service']} got {e['status']}; retry {e['attempt']} after {e['wait']}s"
+    if kind == "degraded":
+        return (f"{head}  CONTINUING WITHOUT {e['service']}: {e['type']}"
+                + (f" HTTP {e['status']}" if "status" in e else "") + (f": {e['reason']}" if "reason" in e else ""))
     if kind == "error":
-        return f"{head}  ERROR {e['type']}"
+        detail = f" HTTP {e['status']}" + (f" from {e['service']}" if "service" in e else "") if "status" in e else ""
+        return f"{head}  ERROR {e['type']}{detail}" + (f": {e['reason']}" if "reason" in e else "")
     return f"{head}  {kind} {json.dumps(e)}"
 
 
