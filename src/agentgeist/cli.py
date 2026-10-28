@@ -130,6 +130,11 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
     if args.submit:
         judgment = submit(scenario, store, team, tick, result)
         escalate(tick, result, judgment, args, team, store, notify, ledger)
+        if result.get("log_dir"):
+            from .trace import record_outcome
+            row = store.get(team, tick.tick_id)
+            record_outcome(result["log_dir"], team=team, judgment=judgment,
+                           escalation=json.loads(row["escalation"]) if row and row["escalation"] else None)
 
 
 def escalate(tick, result, judgment, args, team, store, notify, ledger=None):

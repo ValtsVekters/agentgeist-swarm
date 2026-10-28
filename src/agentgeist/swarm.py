@@ -1,7 +1,6 @@
 import json
 import math
 import os
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -31,11 +30,8 @@ class BudgetLLM(BaseLLM):
         start = time.monotonic()
         value = self.inner.call(messages, **kwargs)
         if self.trace:
-            role = re.search(r"You are (.+?)\. ", messages[0]["content"] if messages else "")
-            prompt = messages[-1]["content"] if messages else ""
-            self.trace.event("model_call", role=role.group(1) if role else "unknown",
-                             seconds=round(time.monotonic() - start, 2), credits=credits,
-                             data_in=prompt.split("Data: ", 1)[-1].split("\n", 1)[0], answer=value)
+            self.trace.record_call(messages, value, round(time.monotonic() - start, 2), credits,
+                                   getattr(self.inner, "model", self.model))
         return self._apply_stop_words(value) if isinstance(value, str) else value
 
     def supports_function_calling(self):
@@ -170,6 +166,9 @@ def run_swarm(tick: Tick, ledger: Ledger):
     commander = Agent(role="Incident commander", goal="Synthesize all three specialists and select one containment action",
                       backstory=COMMANDER_RULES, allow_delegation=False, **common)
 
+    def evidence_by_role():
+        return {agent.role: evidence[tool.name] for tool, agent in zip(tools, workers) if tool.name in evidence}
+
     def analyze(tool, agent, rows):
         start = time.monotonic()
         tool._run()
@@ -212,14 +211,17 @@ def run_swarm(tick: Tick, ledger: Ledger):
         trace.event("decision", proposed=proposed.model_dump(), final=final.model_dump(),
                     supervisor_override=not model_decision_valid or proposed.action != final.action,
                     model_decision_valid=model_decision_valid, credits_reserved=ledger.spent)
-        return {"decision": final.model_dump(), "proposed": proposed.model_dump(),
-                "supervisor_override": not model_decision_valid or proposed.action != final.action, "evidence": evidence,
-                "model_decision_valid": model_decision_valid,
-                "sensor_inspection_priority": priority,
-                "peak_active_agents": ledger.peak, "credits_reserved": ledger.spent,
-                "credits_remaining": ledger.remaining}
+        result = {"decision": final.model_dump(), "proposed": proposed.model_dump(),
+                  "supervisor_override": not model_decision_valid or proposed.action != final.action, "evidence": evidence,
+                  "model_decision_valid": model_decision_valid,
+                  "sensor_inspection_priority": priority,
+                  "peak_active_agents": ledger.peak, "credits_reserved": ledger.spent,
+                  "credits_remaining": ledger.remaining}
+        result["log_dir"] = trace.save_run(tick, result, evidence_by_role())
+        return result
     except Exception as exc:
         trace.event("error", type=type(exc).__name__)  # type only: HTTP errors can carry credentials
+        trace.save_run(tick, evidence=evidence_by_role(), error=type(exc).__name__)
         raise
     finally:
         partners.close()

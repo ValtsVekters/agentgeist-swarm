@@ -8,7 +8,7 @@ from agentgeist.budget import BudgetExceeded, Ledger
 from agentgeist.connections import decode_tool, one_env
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
 from agentgeist.store import Store, process_lock
-from agentgeist.trace import Trace
+from agentgeist.trace import Trace, record_outcome
 
 
 def fixture(name="outbreak-level-5"):
@@ -39,6 +39,29 @@ def test_trace_writes_only_when_enabled(tmp_path, monkeypatch):
     Trace(142).event("model_call", role="Sensor analyst", answer="ok")
     (event,) = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert event["tick_id"] == 142 and event["kind"] == "model_call" and event["answer"] == "ok"
+
+
+def test_tick_log_folder_has_a_file_per_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTGEIST_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("AGENTGEIST_TRACE", raising=False)
+    tick = Tick.model_validate(fixture()[0])
+    trace = Trace(tick.tick_id)
+    trace.record_call([{"role": "system", "content": "You are Sensor analyst. Rows."},
+                       {"role": "user", "content": 'Current Task: Data: [["a",1]]\n\nRules'}],
+                      "Thought: high EMF\nFinal Answer: a: anomalous", 1.2, 900, "m")
+    result = {"decision": {"action": "evacuate", "rationale": "r"}, "proposed": {"action": "evacuate", "rationale": "r"},
+              "supervisor_override": False, "model_decision_valid": True, "credits_reserved": 900, "peak_active_agents": 4}
+    folder = Path(trace.save_run(tick, result, {"Sensor analyst": [{"sector": "a"}]}))
+    record_outcome(folder, team="agentgeist-test", judgment={"verdict": "correct", "score": 1})
+    assert sorted(p.name for p in folder.iterdir()) == ["0_tick.json", "1_sensor_analyst.md", "5_outcome.json", "summary.md"]
+    page = (folder / "1_sensor_analyst.md").read_text(encoding="utf-8")
+    assert "high EMF" in page and "a: anomalous" in page and '"sector": "a"' in page
+    assert "Verdict: **correct**" in (folder / "summary.md").read_text(encoding="utf-8")
+
+
+def test_tick_log_disabled_with_empty_dir(monkeypatch):
+    monkeypatch.setenv("AGENTGEIST_LOG_DIR", "")
+    assert Trace(1).save_run(Tick.model_validate(fixture()[0])) is None
 
 
 def test_team_normalization():
