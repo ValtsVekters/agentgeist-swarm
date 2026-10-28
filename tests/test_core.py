@@ -5,13 +5,29 @@ import pytest
 from pydantic import ValidationError
 
 from agentgeist.budget import BudgetExceeded, Ledger
-from agentgeist.connections import decode_tool
+from agentgeist.connections import decode_tool, one_env
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
-from agentgeist.store import Store
+from agentgeist.store import Store, process_lock
 
 
 def fixture(name="outbreak-level-5"):
     return json.loads(Path(f"fixtures/{name}.json").read_text())["ticks"]
+
+
+def test_process_lock_is_exclusive_and_released(tmp_path):
+    path = str(tmp_path / "db.lock")
+    with process_lock(path):
+        with pytest.raises(OSError):
+            with process_lock(path): pass
+    with process_lock(path): pass
+
+
+def test_one_env_passes_key_but_not_other_secrets(monkeypatch):
+    monkeypatch.setenv("ONE_API_KEY", "sk_test_one")
+    monkeypatch.setenv("PARASAIL_API_KEY", "leak")
+    env = one_env()
+    assert env["ONE_SECRET"] == "sk_test_one" and env["HOME"]
+    assert "leak" not in env.values()
 
 
 def test_team_normalization():

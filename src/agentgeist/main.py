@@ -1,7 +1,6 @@
 """CrewAI AMP Flow entry point. The default runs real agents on a saved fixture."""
 
 import asyncio
-import fcntl
 import json
 import os
 import sys
@@ -43,7 +42,7 @@ def execute(options: RunOptions):
     if options.mode == "fixture":
         from agentgeist.budget import Ledger
         from agentgeist.swarm import run_swarm
-        data = json.loads(files("agentgeist").joinpath("fixtures", options.scenario + ".json").read_text())
+        data = json.loads(files("agentgeist").joinpath("fixtures", options.scenario + ".json").read_text(encoding="utf-8"))
         tick = Tick.model_validate(data["ticks"][0])
         result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
         return {"mode": "fixture", "tick_id": tick.tick_id, "submitted": False, "discord_posted": False, **result}
@@ -64,7 +63,7 @@ def execute(options: RunOptions):
         raise ValueError("Set AGENTGEIST_STATE_DIR to an absolute durable directory before live mode")
 
     from agentgeist.cli import run
-    from agentgeist.store import Store
+    from agentgeist.store import Store, process_lock
     directory = Path(state_directory)
     db = str(directory / "agentgeist.sqlite3")
     args = Namespace(team=options.team, db=db, scenario=options.scenario, ticks=1,
@@ -72,10 +71,9 @@ def execute(options: RunOptions):
                      discord_transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        with open(db + ".lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with process_lock(db + ".lock"):
             # MCP console events include authenticated URLs and tool arguments.
-            with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
+            with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
                 try:
                     run(args)
                 finally:
@@ -110,6 +108,8 @@ class AgentgeistFlow(Flow[AgentgeistState]):
 
 def kickoff():
     """Standard `crewai run` entry point: real provider calls, no venue side effects."""
+    from agentgeist.cli import utf8_console
+    utf8_console()
     tracing = os.getenv("CREWAI_TRACING_ENABLED", "").lower()
     flow = AgentgeistFlow(tracing=tracing == "true" if tracing in ("true", "false") else None)
     print(json.dumps(flow.kickoff()))
@@ -117,6 +117,8 @@ def kickoff():
 
 def run_with_trigger():
     """Standard AMP trigger entry point. The platform supplies a JSON payload."""
+    from agentgeist.cli import utf8_console
+    utf8_console()
     if len(sys.argv) != 2:
         raise ValueError("Provide exactly one JSON trigger payload")
     payload = json.loads(sys.argv[1])

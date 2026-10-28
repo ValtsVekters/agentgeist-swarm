@@ -1,5 +1,4 @@
 import argparse
-import fcntl
 import json
 import os
 import sys
@@ -10,7 +9,15 @@ from dotenv import load_dotenv
 
 from .budget import BudgetExceeded, Ledger
 from .contracts import Tick, safety_floor, team_handle
-from .store import Store
+from .store import Store, process_lock
+
+
+def utf8_console():
+    """Windows pipes default to cp1252, which cannot encode CrewAI's console box drawing."""
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def emit(event, **data):
@@ -160,6 +167,7 @@ def tick_ledger(tick, team, store):
 
 
 def main():
+    utf8_console()
     load_dotenv()
     os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
     os.environ.setdefault("OTEL_SDK_DISABLED", "true")
@@ -188,7 +196,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "demo":
-            for data in json.loads(Path(args.fixture).read_text())["ticks"]:
+            for data in json.loads(Path(args.fixture).read_text(encoding="utf-8"))["ticks"]:
                 tick = Tick.model_validate(data)
                 emit("OFFLINE_POLICY_DEMO", tick_id=tick.tick_id, decision=safety_floor(tick).model_dump(),
                      live_services_used=False, scored=False)
@@ -203,8 +211,7 @@ def main():
             from .notifier import notify
             team = team_handle(args.team)
             Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-            with open(args.db + ".lock", "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with process_lock(args.db + ".lock"):
                 store = Store(args.db)
                 rows = [store.get(team, args.tick_id)] if args.tick_id is not None else store.pending(team)
                 if args.tick_id is not None and rows == [None]:
@@ -224,8 +231,7 @@ def main():
         elif args.command == "resolve":
             team = team_handle(args.team)
             Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-            with open(args.db + ".lock", "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with process_lock(args.db + ".lock"):
                 store = Store(args.db)
                 row = store.get(team, args.tick_id)
                 if not row:
@@ -246,8 +252,7 @@ def main():
                 emit("resolved", tick_id=args.tick_id, resolution=args.resolution)
         else:
             Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-            with open(args.db + ".lock", "w") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with process_lock(args.db + ".lock"):
                 run(args)
     except Exception as exc:
         # Exceptions from HTTP libraries can include authenticated URLs. Print types only.

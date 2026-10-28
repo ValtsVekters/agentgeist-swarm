@@ -10,6 +10,20 @@ class MCPToolError(RuntimeError):
     pass
 
 
+# Node and npx on Windows cannot start without these, beyond PATH.
+WINDOWS_NODE_ENV = ("SYSTEMROOT", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP")
+
+
+def one_env():
+    """Minimal child environment for the One stdio server: the key, never the rest of .env."""
+    env = {"ONE_SECRET": os.environ["ONE_API_KEY"], "ONE_PERMISSIONS": "write",
+           "PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp")}
+    if os.name == "nt":
+        env.update({k: os.environ[k] for k in WINDOWS_NODE_ENV if k in os.environ})
+        env["HOME"] = os.environ.get("HOME") or os.environ.get("USERPROFILE", "")
+    return env
+
+
 def decode_tool(value):
     if hasattr(value, "model_dump"):
         value = value.model_dump(by_alias=True)
@@ -39,9 +53,8 @@ class MCPConnection:
         from crewai.mcp.tool_resolver import MCPToolResolver
         from crewai.utilities.logger import Logger
         self.resolver = MCPToolResolver(agent=None, logger=Logger(verbose=False))
-        config = (MCPServerStdio(command="npx", args=["--yes", "@withone/mcp@2.3.2"],
-                    env={"ONE_SECRET": os.environ["ONE_API_KEY"], "ONE_PERMISSIONS": "write",
-                         "PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp")})
+        config = (MCPServerStdio(command="npx.cmd" if os.name == "nt" else "npx",
+                                 args=["--yes", "@withone/mcp@2.3.2"], env=one_env())
                   if one else MCPServerHTTP(url=url, streamable=True, headers=headers or {}))
         # CrewAI prints connection URLs, which can contain credentials. Keep them out of logs.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -88,9 +101,14 @@ class Partners:
         if urls:
             self.ledger.reserve(500)
             r = self.client.post("https://ydc-index.io/v1/contents",
-                                 headers={"X-API-Key": os.environ["YOU_API_KEY"]}, json={"urls": urls})
+                                 headers={"X-API-Key": os.environ["YOU_API_KEY"]},
+                                 json={"urls": urls, "formats": ["markdown"]})
             r.raise_for_status()
-            result["contents"] = json.dumps(r.json())[:2000]
+            # Markdown page text, not raw HTML: the lore itself at a fraction of the tokens.
+            pages = r.json()
+            pages = pages if isinstance(pages, list) else []
+            result["contents"] = [{"url": p.get("url"), "excerpt": str(p.get("markdown") or "")[:500]}
+                                  for p in pages if isinstance(p, dict)]
         return result
 
     def close(self):
