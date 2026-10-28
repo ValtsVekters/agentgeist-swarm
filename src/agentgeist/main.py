@@ -45,7 +45,10 @@ def execute(options: RunOptions):
         data = json.loads(files("agentgeist").joinpath("fixtures", options.scenario + ".json").read_text(encoding="utf-8"))
         tick = Tick.model_validate(data["ticks"][0])
         result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
-        return {"mode": "fixture", "tick_id": tick.tick_id, "submitted": False, "discord_posted": False, **result}
+        from agentgeist.report import email_report
+        email = email_report(result.get("log_dir"))
+        return {"mode": "fixture", "tick_id": tick.tick_id, "submitted": False, "discord_posted": False,
+                "email_report": email["status"] if email else "off", **result}
 
     if os.getenv("AGENTGEIST_ENABLE_LIVE", "false").lower() != "true":
         raise ValueError("Set AGENTGEIST_ENABLE_LIVE=true only after configuring durable, single-worker state")

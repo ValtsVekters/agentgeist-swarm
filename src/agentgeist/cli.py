@@ -138,6 +138,12 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
             row = store.get(team, tick.tick_id)
             record_outcome(result["log_dir"], team=team, judgment=judgment,
                            escalation=json.loads(row["escalation"]) if row and row["escalation"] else None)
+    if result.get("log_dir"):
+        # After submission and Discord: the email report never delays a scored answer.
+        from .report import email_report
+        report = email_report(result["log_dir"])
+        if report:
+            emit("email_report", tick_id=tick.tick_id, status=report["status"], via=report["via"])
 
 
 def escalate(tick, result, judgment, args, team, store, notify, ledger=None):

@@ -106,6 +106,14 @@ class Trace:
             name = f"{index}_{call['role'].lower().replace(' ', '_')}.md"
             (folder / name).write_text(self._agent_page(call, evidence.get(call["role"])), encoding="utf-8")
         (folder / "summary.md").write_text(self._summary(tick, result, calls, error), encoding="utf-8")
+        run = {"tick_id": self.tick_id, "started": self.started, "sectors": [s.sector for s in tick.sector_reports],
+               "swarm_seconds": round(time.monotonic() - self.start, 2), "error": error,
+               "calls": [{"role": c["role"], "output": split_answer(c["answer"])[1], "seconds": c["seconds"], "t": c["t"]}
+                         for c in calls], "retries": self.retries, "degraded": self.degraded}
+        if result:
+            run.update({k: result.get(k) for k in ("decision", "proposed", "supervisor_override", "credits_reserved",
+                                                   "peak_active_agents")})
+        (folder / "run.json").write_text(json.dumps(run, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         return str(folder)
 
     def _agent_page(self, call, tool_evidence):

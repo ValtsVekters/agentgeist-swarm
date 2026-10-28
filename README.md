@@ -93,6 +93,17 @@ Raw responses remain in the SQLite `ingress` table when validation fails. Inspec
 Plain `run` advances the live cursor even without `--submit`. Use `demo` for offline checks.
 Public messages use only the supervisor's trusted rationale. They include a simulation label and disable all mentions.
 
+### Tick logs and email reports
+
+Every tick writes `logs/<time>_tick-<id>/`: the raw tick, one file per agent (instructions, data given, thinking,
+output, exact messages, timing, credits), `summary.md` and `run.json`. Live submissions add the venue verdict and Discord link.
+`uv run python scripts/show_trace.py --follow` watches agents live when `AGENTGEIST_TRACE` is set.
+
+Set `AGENTGEIST_REPORT_EMAIL` to email each tick's report: a short explanation, a table of what each agent said and the
+full agent logs. **One** sends it through the operator's connected Gmail (`one add gmail`), so the swarm never holds a
+Gmail credential. It runs after submission and Discord, is never retried (a resend is a duplicate email), and records
+`6_email.json` plus a line in `summary.md`. A failure never stops the tick.
+
 ### Discord webhook delivery
 
 Set `DISCORD_WEBHOOK_URL` in the environment or the ignored `.env` file. Never commit the URL or pass it as a command argument.

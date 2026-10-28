@@ -5,6 +5,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from agentgeist import report
 from agentgeist.budget import BudgetExceeded, Ledger
 from agentgeist.connections import Partners, decode_tool, describe_error, one_env, with_retries
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
@@ -43,22 +44,77 @@ def test_trace_writes_only_when_enabled(tmp_path, monkeypatch):
     assert event["tick_id"] == 142 and event["kind"] == "model_call" and event["answer"] == "ok"
 
 
-def test_tick_log_folder_has_a_file_per_agent(tmp_path, monkeypatch):
+def tick_folder(tmp_path, monkeypatch, output="a: anomalous"):
     monkeypatch.setenv("AGENTGEIST_LOG_DIR", str(tmp_path))
     monkeypatch.delenv("AGENTGEIST_TRACE", raising=False)
     tick = Tick.model_validate(fixture()[0])
     trace = Trace(tick.tick_id)
     trace.record_call([{"role": "system", "content": "You are Sensor analyst. Rows."},
                        {"role": "user", "content": 'Current Task: Data: [["a",1]]\n\nRules'}],
-                      "Thought: high EMF\nFinal Answer: a: anomalous", 1.2, 900, "m")
+                      f"Thought: high EMF\nFinal Answer: {output}", 1.2, 900, "m")
     result = {"decision": {"action": "evacuate", "rationale": "r"}, "proposed": {"action": "evacuate", "rationale": "r"},
               "supervisor_override": False, "model_decision_valid": True, "credits_reserved": 900, "peak_active_agents": 4}
-    folder = Path(trace.save_run(tick, result, {"Sensor analyst": [{"sector": "a"}]}))
+    return Path(trace.save_run(tick, result, {"Sensor analyst": [{"sector": "a"}]}))
+
+
+def test_tick_log_folder_has_a_file_per_agent(tmp_path, monkeypatch):
+    folder = tick_folder(tmp_path, monkeypatch)
     record_outcome(folder, team="agentgeist-test", judgment={"verdict": "correct", "score": 1})
-    assert sorted(p.name for p in folder.iterdir()) == ["0_tick.json", "1_sensor_analyst.md", "5_outcome.json", "summary.md"]
+    assert sorted(p.name for p in folder.iterdir()) == ["0_tick.json", "1_sensor_analyst.md", "5_outcome.json",
+                                                         "run.json", "summary.md"]
     page = (folder / "1_sensor_analyst.md").read_text(encoding="utf-8")
     assert "high EMF" in page and "a: anomalous" in page and '"sector": "a"' in page
     assert "Verdict: **correct**" in (folder / "summary.md").read_text(encoding="utf-8")
+
+
+def one_gmail(monkeypatch, send_status=200):
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/v1/vault/connections":
+            return httpx.Response(200, json={"rows": [{"platform": "gmail", "key": "live::gmail::default::abc"}]})
+        sent.append(request)
+        if send_status != 200:
+            return httpx.Response(send_status, json={"message": "nope"})
+        return httpx.Response(200, json={"email": {"messageId": "m1", "sent": True}})
+    real = httpx.Client
+    monkeypatch.setattr(report.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setenv("ONE_API_KEY", "sk_test_one")
+    monkeypatch.delenv("ONE_GMAIL_CONNECTION_KEY", raising=False)
+    return sent
+
+
+def test_email_report_off_without_address(tmp_path, monkeypatch):
+    sent = one_gmail(monkeypatch)
+    monkeypatch.delenv("AGENTGEIST_REPORT_EMAIL", raising=False)
+    assert report.email_report(tick_folder(tmp_path, monkeypatch)) is None and sent == []
+
+
+def test_email_report_sends_explanation_and_logs_through_one(tmp_path, monkeypatch):
+    sent = one_gmail(monkeypatch)
+    monkeypatch.setenv("AGENTGEIST_REPORT_EMAIL", "me@example.com")
+    folder = tick_folder(tmp_path, monkeypatch, output="<script>x</script> bar: anomalous")
+    record_outcome(folder, team="agentgeist-test", judgment={"verdict": "correct", "score": 1, "false_alarm": False})
+    assert report.email_report(folder)["status"] == "sent"
+    (request,) = sent
+    payload = json.loads(request.content)
+    assert request.url.path == "/v1/passthrough/v1/gmail/send-email"
+    assert request.headers["x-one-action-id"] == report.SEND_ACTION
+    assert payload["to"] == "me@example.com" and payload["isHtml"] and payload["connectionKey"].startswith("live::gmail")
+    assert payload["subject"] == "Agentgeist (agentgeist-test) tick 142: EVACUATE, venue: correct 1"
+    assert "judged it correct" in payload["body"] and "1_sensor_analyst.md" in payload["body"]
+    assert "<script>" not in payload["body"] and "&lt;script&gt;" in payload["body"]
+    assert "Email report: sent" in (folder / "summary.md").read_text(encoding="utf-8")
+
+
+def test_email_report_failure_is_recorded_not_raised_and_not_retried(tmp_path, monkeypatch):
+    sent = one_gmail(monkeypatch, send_status=503)
+    monkeypatch.setenv("AGENTGEIST_REPORT_EMAIL", "me@example.com")
+    folder = tick_folder(tmp_path, monkeypatch)
+    result = report.email_report(folder)
+    assert result["status"] == "failed" and result["error"]["status"] == 503 and len(sent) == 1
+    assert json.loads((folder / "6_email.json").read_text())["error"]["type"] == "HTTPStatusError"
+    assert "Email report: failed" in (folder / "summary.md").read_text(encoding="utf-8")
 
 
 def test_tick_log_disabled_with_empty_dir(monkeypatch):
