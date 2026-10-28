@@ -1,6 +1,8 @@
 import json
 import math
 import os
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -12,18 +14,28 @@ from pydantic import BaseModel, Field
 from .budget import Ledger
 from .connections import Partners
 from .contracts import Decision, Tick, safety_floor
+from .trace import Trace
 
 
 class BudgetLLM(BaseLLM):
     inner: Any = Field(exclude=True, repr=False)
     ledger: Any = Field(exclude=True, repr=False)
+    trace: Any = Field(default=None, exclude=True, repr=False)
 
     def call(self, messages, **kwargs):
         # Reserve conservative local token-equivalent units plus full output allowance.
         import tiktoken
         text = json.dumps(messages, default=str)
-        self.ledger.reserve(2 * len(tiktoken.get_encoding("cl100k_base").encode(text)) + 1024)
+        credits = 2 * len(tiktoken.get_encoding("cl100k_base").encode(text)) + 1024
+        self.ledger.reserve(credits)
+        start = time.monotonic()
         value = self.inner.call(messages, **kwargs)
+        if self.trace:
+            role = re.search(r"You are (.+?)\. ", messages[0]["content"] if messages else "")
+            prompt = messages[-1]["content"] if messages else ""
+            self.trace.event("model_call", role=role.group(1) if role else "unknown",
+                             seconds=round(time.monotonic() - start, 2), credits=credits,
+                             data_in=prompt.split("Data: ", 1)[-1].split("\n", 1)[0], answer=value)
         return self._apply_stop_words(value) if isinstance(value, str) else value
 
     def supports_function_calling(self):
@@ -127,6 +139,9 @@ COMMANDER_RULES = (
 
 def run_swarm(tick: Tick, ledger: Ledger):
     """Three scoped specialists and one commander; no worker receives the whole tick."""
+    trace = Trace(tick.tick_id)
+    trace.event("tick_start", sectors=[s.sector for s in tick.sector_reports],
+                max_agents=tick.swarm_budget.max_active_agents, credits=tick.swarm_budget.api_credits_remaining)
     partners = Partners(ledger)
     evidence = {}
     sensors = [{"sector": s.sector, "sensors": s.sensors.model_dump()} for s in tick.sector_reports]
@@ -146,7 +161,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
     inner = LLM(model="openai/" + os.getenv("PARASAIL_CHAT_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
                 base_url="https://api.parasail.io/v1", api_key=os.environ["PARASAIL_API_KEY"],
                 temperature=0, max_tokens=600, timeout=35, max_retries=0)
-    llm = BudgetLLM(model="agentgeist-budgeted-parasail", inner=inner, ledger=ledger)
+    llm = BudgetLLM(model="agentgeist-budgeted-parasail", inner=inner, ledger=ledger, trace=trace)
     common = dict(llm=llm, verbose=bool(os.getenv("AGENTGEIST_DEBUG")), max_iter=1, max_retry_limit=0, max_execution_time=90)
     # Each specialist's tool runs in code right before its analysis (the mandatory sensing phase), so the
     # agent itself holds no tools: a CrewAI tool loop would only spend a second model call re-reading it.
@@ -156,7 +171,9 @@ def run_swarm(tick: Tick, ledger: Ledger):
                       backstory=COMMANDER_RULES, allow_delegation=False, **common)
 
     def analyze(tool, agent, rows):
+        start = time.monotonic()
         tool._run()
+        trace.event("tool", role=agent.role, tool=tool.name, seconds=round(time.monotonic() - start, 2))
         task = Task(description="Data: " + compact(rows(evidence[tool.name])),
                     expected_output="One line per sector", agent=agent)
         return agent.role, str(agent.execute_task(task))
@@ -192,11 +209,17 @@ def run_swarm(tick: Tick, ledger: Ledger):
         final = proposed if proposed.action == floor.action else floor
         priority = [s["sector"] for s in sorted(evidence["sensor_signatures"],
                     key=lambda s: (s["physical_indicators"], s["anomaly_similarity"] - s["normal_similarity"]), reverse=True)]
+        trace.event("decision", proposed=proposed.model_dump(), final=final.model_dump(),
+                    supervisor_override=not model_decision_valid or proposed.action != final.action,
+                    model_decision_valid=model_decision_valid, credits_reserved=ledger.spent)
         return {"decision": final.model_dump(), "proposed": proposed.model_dump(),
                 "supervisor_override": not model_decision_valid or proposed.action != final.action, "evidence": evidence,
                 "model_decision_valid": model_decision_valid,
                 "sensor_inspection_priority": priority,
                 "peak_active_agents": ledger.peak, "credits_reserved": ledger.spent,
                 "credits_remaining": ledger.remaining}
+    except Exception as exc:
+        trace.event("error", type=type(exc).__name__)  # type only: HTTP errors can carry credentials
+        raise
     finally:
         partners.close()

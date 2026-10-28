@@ -8,6 +8,7 @@ from agentgeist.budget import BudgetExceeded, Ledger
 from agentgeist.connections import decode_tool, one_env
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
 from agentgeist.store import Store, process_lock
+from agentgeist.trace import Trace
 
 
 def fixture(name="outbreak-level-5"):
@@ -28,6 +29,16 @@ def test_one_env_passes_key_but_not_other_secrets(monkeypatch):
     env = one_env()
     assert env["ONE_SECRET"] == "sk_test_one" and env["HOME"]
     assert "leak" not in env.values()
+
+
+def test_trace_writes_only_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENTGEIST_TRACE", raising=False)
+    Trace(1).event("tool", role="r")
+    path = tmp_path / "t" / "trace.jsonl"
+    monkeypatch.setenv("AGENTGEIST_TRACE", str(path))
+    Trace(142).event("model_call", role="Sensor analyst", answer="ok")
+    (event,) = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert event["tick_id"] == 142 and event["kind"] == "model_call" and event["answer"] == "ok"
 
 
 def test_team_normalization():
