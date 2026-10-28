@@ -41,7 +41,8 @@ class AgentgeistState(RunOptions):
 def execute(options: RunOptions):
     if options.mode == "fixture":
         from agentgeist.budget import Ledger
-        from agentgeist.swarm import run_swarm
+        from agentgeist.swarm import run_swarm, warm_up
+        warm_up()
         data = json.loads(files("agentgeist").joinpath("fixtures", options.scenario + ".json").read_text(encoding="utf-8"))
         tick = Tick.model_validate(data["ticks"][0])
         result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))

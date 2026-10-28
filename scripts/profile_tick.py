@@ -95,6 +95,9 @@ def main():
     wrap(Agent, "execute_task", lambda agent, *a, **k: f"specialist {agent.role}", phases)
     wrap(swarm.ScopedCrew, "kickoff", lambda *a, **k: "commander crew (hierarchical)", phases)
 
+    warm_start = time.perf_counter()
+    swarm.warm_up()  # as the CLI does before pulling ticks
+    print(f"warm-up (before the tick, not counted): {time.perf_counter() - warm_start:.2f}s")
     ledger = Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining)
     start = time.perf_counter()
     result = swarm.run_swarm(tick, ledger)

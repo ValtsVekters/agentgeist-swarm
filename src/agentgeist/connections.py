@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import io
 import json
 import os
@@ -137,11 +138,18 @@ def with_retries(call, on_retry=None, sleep=time.sleep):
             sleep(delay)
 
 
+@functools.lru_cache(maxsize=1)
+def shared_client():
+    """One HTTPS client per process. Building a client loads the CA bundle (~0.3 s on Windows) and a new
+    client re-handshakes TLS, so reuse keeps both out of each tick. httpx clients are thread-safe."""
+    return httpx.Client(timeout=25, follow_redirects=False)
+
+
 class Partners:
     def __init__(self, ledger, trace=None):
         self.ledger = ledger
         self.trace = trace
-        self.client = httpx.Client(timeout=25, follow_redirects=False)
+        self.client = shared_client()
 
     def _post(self, service, url, **kwargs):
         def attempt():
@@ -182,4 +190,4 @@ class Partners:
         return result
 
     def close(self):
-        self.client.close()
+        pass  # the client is shared across ticks; the process closes it on exit

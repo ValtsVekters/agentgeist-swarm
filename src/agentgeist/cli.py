@@ -57,10 +57,11 @@ def submit(scenario, store, team, tick, result):
 
 def run(args):
     from .connections import MCPConnection
-    from .swarm import run_swarm
+    from .swarm import run_swarm, warm_up
     from .notifier import notify
     team = team_handle(args.team)
     store = Store(args.db)
+    warm_up()  # before any tick is pulled: the decision clock then measures only the tick
     scenario = MCPConnection(os.environ["SCENARIO_MCP"])
     try:
         # Resume durable inbox/outbox first; never pull over an unfinished tick.

@@ -10,8 +10,17 @@ from agentgeist.budget import BudgetExceeded, Ledger
 from agentgeist.connections import Partners, decode_tool, describe_error, one_env, with_retries
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
 from agentgeist.store import Store, process_lock
-from agentgeist.swarm import SPECIALISTS, sensor_intel
+from agentgeist.swarm import SPECIALISTS, chat_model, sensor_intel
 from agentgeist.trace import Trace, describe, record_outcome
+
+
+def test_clients_are_built_once_per_process(monkeypatch):
+    # Each new HTTPS client costs ~0.3 s on Windows; rebuilding them per tick cost ~0.8 s.
+    monkeypatch.setenv("PARASAIL_API_KEY", "k")
+    first = Partners(Ledger(8, 1000))
+    first.close()
+    assert Partners(Ledger(8, 1000)).client is first.client and not first.client.is_closed
+    assert chat_model("some-model") is chat_model("some-model")
 
 
 def fixture(name="outbreak-level-5"):
