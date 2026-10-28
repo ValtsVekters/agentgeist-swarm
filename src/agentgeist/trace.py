@@ -43,6 +43,7 @@ class Trace:
         self.started = time.strftime("%Y-%m-%d %H:%M:%S")
         self.start = time.monotonic()
         self.calls = []
+        self.retries = []
         self.lock = threading.Lock()  # specialists write from parallel threads
         if self.path:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +67,13 @@ class Trace:
                                "credits": credits, "model": model, "t": round(time.monotonic() - self.start, 2)})
         self.event("model_call", role=role, seconds=seconds, credits=credits,
                    data_in=prompt.split("Data: ", 1)[-1].split("\n", 1)[0], answer=answer)
+
+    def record_retry(self, service, status, attempt, wait):
+        retry = {"service": service, "status": status, "attempt": attempt, "wait": wait,
+                 "t": round(time.monotonic() - self.start, 2)}
+        with self.lock:
+            self.retries.append(retry)
+        self.event("retry", **{k: v for k, v in retry.items() if k != "t"})
 
     def save_run(self, tick, result=None, evidence=None, error=None):
         """Write logs/<time>_tick-<id>/ and return its path, or None when disabled."""
@@ -120,6 +128,11 @@ class Trace:
         for c in calls:
             output = split_answer(c["answer"])[1].replace("\n", " · ").replace("|", "/")
             lines.append(f"| {c['role']} | +{c['t']}s | {c['seconds']}s | {output} |")
+        if self.retries:
+            lines += ["", "## Retries (rate limits or temporary upstream errors)", "",
+                      "| At | Service | Status | Retry | Waited |", "|---|---|---|---|---|"]
+            lines += [f"| +{r['t']}s | {r['service']} | {r['status']} | {r['attempt']} | {r['wait']}s |"
+                      for r in self.retries]
         return "\n".join(lines) + "\n"
 
 

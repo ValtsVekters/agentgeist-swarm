@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
 from agentgeist.budget import BudgetExceeded, Ledger
-from agentgeist.connections import decode_tool, one_env
+from agentgeist.connections import Partners, decode_tool, one_env, with_retries
 from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
 from agentgeist.store import Store, process_lock
 from agentgeist.trace import Trace, record_outcome
@@ -62,6 +63,50 @@ def test_tick_log_folder_has_a_file_per_agent(tmp_path, monkeypatch):
 def test_tick_log_disabled_with_empty_dir(monkeypatch):
     monkeypatch.setenv("AGENTGEIST_LOG_DIR", "")
     assert Trace(1).save_run(Tick.model_validate(fixture()[0])) is None
+
+
+class Upstream(Exception):
+    def __init__(self, status, retry_after=None):
+        self.status_code = status
+        self.response = type("R", (), {"status_code": status,
+                                       "headers": {"retry-after": retry_after} if retry_after else {}})()
+
+
+def test_with_retries_recovers_from_rate_limit():
+    attempts, waits, seen = [], [], []
+
+    def call():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise Upstream(429, retry_after="30" if len(attempts) == 2 else None)
+        return "ok"
+    assert with_retries(call, on_retry=lambda *a: seen.append(a), sleep=waits.append) == "ok"
+    assert waits == [0.5, 4.0]  # default backoff, then Retry-After capped
+    assert [s[:2] for s in seen] == [(429, 1), (429, 2)]
+
+
+@pytest.mark.parametrize("error", [Upstream(400), Upstream(401), TimeoutError("slow")])
+def test_with_retries_does_not_retry_permanent_errors_or_timeouts(error):
+    waits = []
+    with pytest.raises(type(error)):
+        with_retries(lambda: (_ for _ in ()).throw(error), sleep=waits.append)
+    assert waits == []
+
+
+def test_with_retries_gives_up_after_two_retries():
+    waits = []
+    with pytest.raises(Upstream):
+        with_retries(lambda: (_ for _ in ()).throw(Upstream(503)), sleep=waits.append)
+    assert waits == [0.5, 1.5]
+
+
+def test_partner_http_retries_429_then_succeeds(monkeypatch):
+    responses = iter([httpx.Response(429, headers={"retry-after": "0"}), httpx.Response(200, json={"data": [
+        {"index": 0, "embedding": [1.0]}]})])
+    monkeypatch.setenv("PARASAIL_API_KEY", "k")
+    partners = Partners(Ledger(8, 10_000))
+    partners.client = httpx.Client(transport=httpx.MockTransport(lambda request: next(responses)))
+    assert partners.embeddings(["x"]) == [[1.0]]
 
 
 def test_team_normalization():

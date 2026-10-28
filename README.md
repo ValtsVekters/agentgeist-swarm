@@ -57,7 +57,8 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 - Direct webhook delivery reserves no incident credits, including failed setup checks and retries. The active-agent limit still applies.
 - A durable team-wide ceiling also limits total reservations across ticks. New ticks cannot reset spent credits.
 - The credit unit is a conservative local token-equivalent estimate, **not verified venue billing**. The feed does not document a monetary conversion.
-- Model reservations use twice the cl100k input token count plus an output allowance. Automatic model retries are disabled.
+- Model reservations use twice the cl100k input token count plus an output allowance.
+- Model, embeddings and You.com calls retry only rate limits (429) and transient upstream errors (5xx, refused connections): at most twice, after 0.5 s and 1.5 s or a `Retry-After` of up to 4 s. Refused requests are not billed, so credits are reserved once. Timeouts are not retried. Retries appear in the agent trace and the tick log.
 - Each specialist and the commander gets one model iteration. Invalid commander JSON triggers an explicit, recorded safety-policy fallback.
 - HTTP requests have bounded timeouts. A failed tick remains in the durable inbox.
 - SQLite saves each raw feed response before validation, each valid tick before inference, and each decision before submission.

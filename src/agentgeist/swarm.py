@@ -11,7 +11,7 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from .budget import Ledger
-from .connections import Partners
+from .connections import Partners, with_retries
 from .contracts import Decision, Tick, safety_floor
 from .trace import Trace
 
@@ -28,7 +28,11 @@ class BudgetLLM(BaseLLM):
         credits = 2 * len(tiktoken.get_encoding("cl100k_base").encode(text)) + 1024
         self.ledger.reserve(credits)
         start = time.monotonic()
-        value = self.inner.call(messages, **kwargs)
+        on_retry = None
+        if self.trace:
+            role = messages[0]["content"].split(". ", 1)[0].replace("You are ", "") if messages else "model"
+            on_retry = lambda status, n, wait: self.trace.record_retry(f"Parasail model ({role})", status, n, wait)
+        value = with_retries(lambda: self.inner.call(messages, **kwargs), on_retry)
         if self.trace:
             self.trace.record_call(messages, value, round(time.monotonic() - start, 2), credits,
                                    getattr(self.inner, "model", self.model))
@@ -138,7 +142,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
     trace = Trace(tick.tick_id)
     trace.event("tick_start", sectors=[s.sector for s in tick.sector_reports],
                 max_agents=tick.swarm_budget.max_active_agents, credits=tick.swarm_budget.api_credits_remaining)
-    partners = Partners(ledger)
+    partners = Partners(ledger, trace)
     evidence = {}
     sensors = [{"sector": s.sector, "sensors": s.sensors.model_dump()} for s in tick.sector_reports]
     sightings = [{"sector": s.sector, "sighting": s.sighting.model_dump() if s.sighting else None}

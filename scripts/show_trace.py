@@ -40,6 +40,8 @@ def render(e):
         verdict = "SUPERVISOR OVERRODE the model" if e["supervisor_override"] else "supervisor agreed"
         return (f"{head}  DECISION {f['action'].upper()}  (model proposed {p['action']}; {verdict}; "
                 f"{e['credits_reserved']} credits total)\n{wrap('why: ' + f['rationale'], '      ')}")
+    if kind == "retry":
+        return f"{head}  RETRY {e['service']} got {e['status']}; retry {e['attempt']} after {e['wait']}s"
     if kind == "error":
         return f"{head}  ERROR {e['type']}"
     return f"{head}  {kind} {json.dumps(e)}"
