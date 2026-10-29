@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "agentgeist-ui",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "agentgeist-ui", "--no-browser", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

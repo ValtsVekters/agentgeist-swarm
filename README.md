@@ -93,6 +93,17 @@ Raw responses remain in the SQLite `ingress` table when validation fails. Inspec
 Plain `run` advances the live cursor even without `--submit`. Use `demo` for offline checks.
 Public messages use only the supervisor's trusted rationale. They include a simulation label and disable all mentions.
 
+### Dashboard
+
+```bash
+uv run agentgeist-ui
+```
+
+Opens `http://127.0.0.1:8765` (local only). Run a test tick (outbreak or false alarm, no venue side effects),
+watch each agent's message arrive live, browse every past tick's logs, check the scoreboard, and run a live tick
+(team handle, submit, Discord and email options, explicit confirmation). Test ticks run in the warmed-up dashboard
+process, so they show the real decision time. Live ticks run the normal `agentgeist run` CLI with `state/<team>.sqlite3`.
+
 ### Tick logs and email reports
 
 Every tick writes `logs/<time>_tick-<id>/`: the raw tick, one file per agent (instructions, data given, thinking,
