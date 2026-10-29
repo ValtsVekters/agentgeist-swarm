@@ -99,10 +99,10 @@ Public messages use only the supervisor's trusted rationale. They include a simu
 uv run agentgeist-ui
 ```
 
-Opens `http://127.0.0.1:8765` (local only). Run a test tick (outbreak or false alarm, no venue side effects),
-watch each agent's message arrive live, browse every past tick's logs, check the scoreboard, and run a live tick
-(team handle, submit, Discord and email options, explicit confirmation). Test ticks run in the warmed-up dashboard
-process, so they show the real decision time. Live ticks run the normal `agentgeist run` CLI with `state/<team>.sqlite3`.
+Opens `http://127.0.0.1:8765` (local only). Run saved ticks 142, 143 and 900 or 1–10 random ticks, and see each
+agent's answer and the decision. Ticks are never submitted to the venue. With "Post to Discord" on, contain and
+evacuate decisions post to `#loft-incident` as `TEAM_HANDLE`, marked "practice (not submitted)"; observe never posts.
+Scored runs stay on the CLI: `agentgeist run --submit --discord`.
 
 ### Tick logs and email reports
 

@@ -1,20 +1,18 @@
-"""Local dashboard: run test or live ticks, watch the agents live, and read every tick's logs.
+"""Local dashboard: run saved or random ticks, see each agent's answer and the decision, post it to Discord.
 
     uv run agentgeist-ui            # opens http://127.0.0.1:8765
     uv run agentgeist-ui --no-browser --port 8765
 
-Serves only on 127.0.0.1. Test ticks run in this process (warmed up once, so they show the real decision time).
-Live ticks run the normal `agentgeist run` CLI as a child process, with its database, lock and safety checks.
-The page never receives keys or the webhook URL: it sees tick data, agent prompts and answers, and results.
+Serves only on 127.0.0.1. Ticks run in this warmed-up process and are never submitted to the venue. Contain and
+evacuate decisions post to Discord #loft-incident as the team in TEAM_HANDLE, marked as practice (not submitted);
+observe never posts. The page never receives keys or the webhook URL.
 """
 
 import argparse
-import collections
 import hmac
 import json
 import os
 import secrets
-import subprocess
 import sys
 import threading
 import time
@@ -29,38 +27,33 @@ from dotenv import load_dotenv
 from .contracts import Tick, safety_floor, team_handle
 from .scenarios import random_tick
 
-SCENARIOS = ("outbreak-level-5", "control-tick")
-LIVE_EVENTS = ("decision", "judgment", "discord_receipt", "escalation_pending", "escalation_skipped", "tick_failed",
-               "email_report", "submission_rejected", "receipt_unverified", "error", "scoreboard")
+SAVED = {"142": ("outbreak-level-5", 0), "143": ("outbreak-level-5", 1), "900": ("control-tick", 0)}
+# Practice ticks are not submitted, so the Discord post says so instead of showing a venue score.
+PRACTICE = {"verdict": "practice", "score": "practice (not submitted)", "false_alarm": "n/a"}
 
 
 class Runner:
-    """One run at a time; the page polls status, live agent events and live CLI output."""
+    """One run at a time; the page polls status and the live agent events."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.current = None  # {"kind", "label", "started"}
-        self.last = None     # last finished run summary
+        self.current = None  # {"label", "started"}
+        self.last = None     # results of the last finished run
         self.warm = "warming up"
-        self.output = collections.deque(maxlen=300)
 
-    def busy(self):
-        return self.current is not None
-
-    def start(self, kind, label, target):
+    def start(self, label, target):
         with self.lock:
             if self.current:
                 raise RuntimeError("A run is already in progress")
-            self.current = {"kind": kind, "label": label, "started": time.time()}
-            self.output.clear()
+            self.current = {"label": label, "started": time.time()}
         threading.Thread(target=self._wrap, args=(target,), daemon=True).start()
 
     def _wrap(self, target):
         try:
-            self.last = {**self.current, **target(), "finished": time.time()}
+            self.last = target()
         except Exception as exc:
             from .connections import describe_error
-            self.last = {**self.current, "ok": False, "error": describe_error(exc), "finished": time.time()}
+            self.last = {"results": [], "error": describe_error(exc)}
         finally:
             with self.lock:
                 self.current = None
@@ -69,127 +62,52 @@ class Runner:
 RUNNER = Runner()
 
 
-def without_email(enabled):
-    """Child environment and in-process toggle for the email report (one run at a time, so no race)."""
-    env = dict(os.environ)
-    if not enabled:
-        env.pop("AGENTGEIST_REPORT_EMAIL", None)
-    return env
-
-
-def saved_tick(scenario, index):
+def saved_tick(tick_id):
+    scenario, index = SAVED[tick_id]
     data = json.loads(files("agentgeist").joinpath("fixtures", scenario + ".json").read_text(encoding="utf-8"))
     tick = Tick.model_validate(data["ticks"][index])
-    return tick, safety_floor(tick).action, None
+    return tick, safety_floor(tick).action
 
 
-def random_ticks(count, seed):
-    seed = secrets.randbelow(10**6) if seed is None else seed
-    return [(*random_tick(seed + i), seed + i) for i in range(count)]
+def post_discord(team, tick, result, ledger):
+    if result["decision"]["action"] == "observe":
+        return {"status": "not posted (observe)"}
+    from .connections import describe_error
+    from .notifier import notify
+    try:
+        receipt = notify(team, tick, result, PRACTICE, ledger, transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
+        return {"status": "posted", "url": receipt.get("message_url")}
+    except Exception as exc:
+        return {"status": "failed", "error": describe_error(exc)}
 
 
-def run_ticks(ticks, email):
-    """Run (tick, expected, seed) items through the warmed swarm like `kickoff`: never submitted or posted.
-    Each result compares the commander's own proposal with the fixed rule the venue referee uses."""
+def run_ticks(ticks, discord):
+    """Run (tick, expected) items through the warmed swarm. Never submitted; optionally posted to Discord."""
     from .budget import Ledger
     from .connections import describe_error
-    from .report import email_report
     from .swarm import run_swarm, warm_up
     warm_up()
-    saved = os.environ.get("AGENTGEIST_REPORT_EMAIL")
-    if not email:
-        os.environ.pop("AGENTGEIST_REPORT_EMAIL", None)
+    team = team_handle(os.getenv("TEAM_HANDLE", "agentgeist"))
     results = []
-    try:
-        for tick, expected, seed in ticks:
-            row = {"tick": tick.tick_id, "seed": seed, "expected": expected, "sectors": len(tick.sector_reports)}
-            try:
-                result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
-                folder = Path(result["log_dir"]) if result.get("log_dir") else None
-                run = json.loads((folder / "run.json").read_text(encoding="utf-8")) if folder else {}
-                mail = email_report(result.get("log_dir"))
-                row.update(proposed=result["proposed"]["action"], action=result["decision"]["action"],
-                           override=result["supervisor_override"], seconds=run.get("swarm_seconds"),
-                           log=folder.name if folder else None, email=mail["status"] if mail else "off",
-                           matched=result["proposed"]["action"] == expected)
-            except Exception as exc:
-                row.update(error=describe_error(exc), matched=False)
-            results.append(row)
-    finally:
-        if saved is not None:
-            os.environ["AGENTGEIST_REPORT_EMAIL"] = saved
-    last = results[-1]
-    return {"ok": "error" not in last, "action": last.get("action"), "seconds": last.get("seconds"),
-            "log": last.get("log"), "email": last.get("email"), "results": results,
-            "matched": sum(r["matched"] for r in results), "total": len(results)}
-
-
-def run_live(team, scenario, submit, discord, email):
-    cmd = [sys.executable, "-m", "agentgeist.cli", "--team", team, "--db", f"state/{team}.sqlite3",
-           "run", "--scenario", scenario, "--ticks", "1"]
-    if submit:
-        cmd.append("--submit")
-    if discord:
-        cmd += ["--discord", "--discord-transport", os.getenv("DISCORD_TRANSPORT", "webhook")]
-    env = {**without_email(email), "PYTHONIOENCODING": "utf-8"}
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                            errors="replace", env=env)
-    summary = {"ok": False}
-    for line in proc.stdout:
-        line = line.strip()
-        if not line.startswith("{"):
-            continue  # CrewAI console noise; the CLI's JSON events carry the results
+    for tick, expected in ticks:
+        row = {"tick": tick.tick_id, "expected": expected}
         try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if event.get("event") in LIVE_EVENTS:
-            RUNNER.output.append(event)
-        if event.get("event") == "decision":
-            summary.update(ok=True, action=event["decision"]["action"], seconds=event.get("decision_seconds"),
-                           log=Path(event["log_dir"]).name if event.get("log_dir") else None)
-        elif event.get("event") == "judgment":
-            summary["judgment"] = event["judgment"]
-        elif event.get("event") == "tick_failed":
-            summary.update(ok=False, error={k: v for k, v in event.items() if k not in ("event", "tick_id")})
-    summary["exit_code"] = proc.wait()
-    return summary
+            ledger = Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining)
+            result = run_swarm(tick, ledger)
+            run = json.loads((Path(result["log_dir"]) / "run.json").read_text(encoding="utf-8")) if result.get("log_dir") else {}
+            result["decision_seconds"] = run.get("swarm_seconds")
+            row.update(action=result["decision"]["action"], rationale=result["decision"]["rationale"],
+                       matched=result["proposed"]["action"] == expected, log=result.get("log_dir"))
+            if discord:
+                row["discord"] = post_discord(team, tick, result, ledger)
+        except Exception as exc:
+            row.update(error=describe_error(exc), matched=False)
+        results.append(row)
+    return {"team": team, "results": results}
 
 
 def trace_path():
     return Path(os.getenv("AGENTGEIST_TRACE") or "state/agent-trace.jsonl")
-
-
-def log_root():
-    return Path(os.getenv("AGENTGEIST_LOG_DIR", "logs") or "logs").resolve()
-
-
-def list_runs(limit=60):
-    runs = []
-    for run_json in sorted(log_root().rglob("run.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
-        folder = run_json.parent
-        try:
-            run = json.loads(run_json.read_text(encoding="utf-8"))
-            outcome = folder / "5_outcome.json"
-            outcome = json.loads(outcome.read_text(encoding="utf-8")) if outcome.exists() else {}
-        except ValueError:
-            continue
-        judgment = outcome.get("judgment") or {}
-        runs.append({"id": str(folder.relative_to(log_root())).replace("\\", "/"), "tick": run.get("tick_id"),
-                     "started": run.get("started"), "action": (run.get("decision") or {}).get("action"),
-                     "seconds": run.get("swarm_seconds"), "error": run.get("error"), "team": outcome.get("team"),
-                     "verdict": judgment.get("verdict"), "score": judgment.get("score"),
-                     "override": run.get("supervisor_override")})
-    return runs
-
-
-def read_run(run_id):
-    root = log_root()
-    folder = (root / run_id).resolve()
-    if root not in folder.parents or not folder.is_dir():  # stay inside logs/: no path traversal
-        raise FileNotFoundError(run_id)
-    return {p.name: p.read_text(encoding="utf-8") for p in sorted(folder.iterdir())
-            if p.is_file() and p.suffix in (".md", ".json")}
 
 
 def read_events(offset):
@@ -207,15 +125,6 @@ def read_events(offset):
     complete = chunk.rfind(b"\n") + 1  # never hand back a half-written line
     lines = chunk[:complete].decode("utf-8", errors="replace").splitlines()
     return {"offset": offset + complete, "events": [json.loads(l) for l in lines if l.strip()]}
-
-
-def scoreboard():
-    from .connections import MCPConnection
-    connection = MCPConnection(os.environ["SCENARIO_MCP"])
-    try:
-        return connection.call("hack26-get-scoreboard")
-    finally:
-        connection.close()
 
 
 # Per-process secret, embedded in the served page and required to start a run: another site open in the
@@ -248,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")  # no framing: nobody can trick a click on "Run live tick"
+        self.send_header("X-Frame-Options", "DENY")  # no framing: nobody can trick a click
         self.end_headers()
         self.wfile.write(data)
 
@@ -256,31 +165,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.trusted():
             return self.send(403, {"error": "forbidden host"})
         url = urlparse(self.path)
-        query = parse_qs(url.query)
-        try:
-            if url.path == "/":
-                page = files("agentgeist").joinpath("dashboard.html").read_bytes()
-                self.send(200, page.replace(b"__AGENTGEIST_TOKEN__", TOKEN.encode()), "text/html")
-            elif url.path == "/api/status":
-                self.send(200, {"running": RUNNER.current, "last": RUNNER.last, "warm": RUNNER.warm,
-                                "output": list(RUNNER.output), "model": os.getenv("PARASAIL_CHAT_MODEL"),
-                                "email": bool(os.getenv("AGENTGEIST_REPORT_EMAIL")), "team": os.getenv("TEAM_HANDLE"),
-                                "discord_transport": os.getenv("DISCORD_TRANSPORT", "auto")})
-            elif url.path == "/api/events":
-                self.send(200, read_events(int(query.get("offset", ["0"])[0])))
-            elif url.path == "/api/runs":
-                self.send(200, list_runs())
-            elif url.path == "/api/run":
-                self.send(200, read_run(query["id"][0]))
-            elif url.path == "/api/scoreboard":
-                self.send(200, scoreboard())
-            else:
-                self.send(404, {"error": "not found"})
-        except FileNotFoundError:
+        if url.path == "/":
+            page = files("agentgeist").joinpath("dashboard.html").read_bytes()
+            self.send(200, page.replace(b"__AGENTGEIST_TOKEN__", TOKEN.encode()), "text/html")
+        elif url.path == "/api/status":
+            self.send(200, {"running": RUNNER.current, "last": RUNNER.last, "warm": RUNNER.warm})
+        elif url.path == "/api/events":
+            self.send(200, read_events(int(parse_qs(url.query).get("offset", ["0"])[0])))
+        else:
             self.send(404, {"error": "not found"})
-        except Exception as exc:
-            from .connections import describe_error
-            self.send(500, {"error": describe_error(exc)})
 
     def do_POST(self):
         # Read the (small, capped) body before answering: replying first makes Windows abort the connection.
@@ -290,36 +183,32 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if not self.trusted(write=True):
             return self.send(403, {"error": "forbidden: cross-site or missing dashboard token"})
+        if urlparse(self.path).path == "/api/email":
+            # Emails the last run's tick reports through One (Gmail). Folders come from the server's own
+            # results, never from the request, so the page cannot point this at other files.
+            from .report import email_report
+            if RUNNER.current or not RUNNER.last:
+                return self.send(400, {"error": "Run a tick first"})
+            sent = [email_report(r["log"]) for r in RUNNER.last["results"] if r.get("log")]
+            ok = sum(1 for s in sent if s and s["status"] == "sent")
+            return self.send(200, {"sent": ok, "total": len(sent), "configured": any(sent)})
         if urlparse(self.path).path != "/api/start":
             return self.send(404, {"error": "not found"})
         try:
             body = json.loads(raw or b"{}")
-            kind, email = body.get("kind"), bool(body.get("email"))
-            if kind == "random":
-                count, seed = int(body.get("count", 1)), body.get("seed")
+            discord = bool(body.get("discord"))
+            if body.get("kind") == "saved":
+                tick_id = str(body.get("tick"))
+                if tick_id not in SAVED:
+                    raise ValueError("Unknown saved tick")
+                RUNNER.start(f"Tick {tick_id}", lambda: run_ticks([saved_tick(tick_id)], discord))
+            elif body.get("kind") == "random":
+                count = int(body.get("count", 1))
                 if not 1 <= count <= 10:
                     raise ValueError("Run 1 to 10 random ticks at a time")
-                seed = None if seed in (None, "") else int(seed)
-                ticks = random_ticks(count, seed)
-                label = f"Random tick{'s' if count > 1 else ''} (seed {ticks[0][2]}{f'..{ticks[-1][2]}' if count > 1 else ''})"
-                RUNNER.start("random", label, lambda: run_ticks(ticks, email))
-                return self.send(200, {"started": True})
-            scenario = body.get("scenario")
-            if scenario not in SCENARIOS:
-                raise ValueError("Unknown scenario")
-            if kind == "fixture":
-                index = int(body.get("index", 0))
-                if index not in (0, 1) or (scenario == "control-tick" and index != 0):
-                    raise ValueError("Unknown saved tick")
-                ticks = [saved_tick(scenario, index)]
-                RUNNER.start("fixture", f"Saved tick {ticks[0][0].tick_id}", lambda: run_ticks(ticks, email))
-            elif kind == "live":
-                if body.get("confirm") != "LIVE":
-                    raise ValueError("Live runs need explicit confirmation")
-                team = team_handle(body.get("team", ""))
-                submit, discord = bool(body.get("submit")), bool(body.get("discord"))
-                RUNNER.start("live", f"Live tick: {team} on {scenario}",
-                             lambda: run_live(team, scenario, submit, discord, email))
+                seed = secrets.randbelow(10**6)
+                ticks = [random_tick(seed + i) for i in range(count)]
+                RUNNER.start(f"{count} random tick{'s' if count > 1 else ''}", lambda: run_ticks(ticks, discord))
             else:
                 raise ValueError("Unknown run kind")
             self.send(200, {"started": True})
