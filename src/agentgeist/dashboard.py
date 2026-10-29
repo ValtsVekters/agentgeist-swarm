@@ -10,8 +10,10 @@ The page never receives keys or the webhook URL: it sees tick data, agent prompt
 
 import argparse
 import collections
+import hmac
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -183,24 +185,49 @@ def scoreboard():
         connection.close()
 
 
+# Per-process secret, embedded in the served page and required to start a run: another site open in the
+# browser can reach 127.0.0.1 but cannot read this page, so it cannot learn the token.
+TOKEN = secrets.token_urlsafe(32)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # keep the terminal quiet; requests carry no secrets but are noisy
+
+    def origins(self):
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def trusted(self, write=False):
+        """Refuse DNS rebinding (foreign Host) on every request, and cross-site requests on writes."""
+        if self.headers.get("Host", "") not in self.origins():
+            return False
+        if not write:
+            return True
+        origin = self.headers.get("Origin")
+        return (self.headers.get("Content-Type", "").startswith("application/json")  # forces a CORS preflight
+                and (origin is None or (origin.startswith("http://") and urlparse(origin).netloc in self.origins()))
+                and hmac.compare_digest(self.headers.get("X-Agentgeist-Token", ""), TOKEN))
 
     def send(self, status, body, content_type="application/json"):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")  # no framing: nobody can trick a click on "Run live tick"
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
+        if not self.trusted():
+            return self.send(403, {"error": "forbidden host"})
         url = urlparse(self.path)
         query = parse_qs(url.query)
         try:
             if url.path == "/":
-                self.send(200, files("agentgeist").joinpath("dashboard.html").read_bytes(), "text/html")
+                page = files("agentgeist").joinpath("dashboard.html").read_bytes()
+                self.send(200, page.replace(b"__AGENTGEIST_TOKEN__", TOKEN.encode()), "text/html")
             elif url.path == "/api/status":
                 self.send(200, {"running": RUNNER.current, "last": RUNNER.last, "warm": RUNNER.warm,
                                 "output": list(RUNNER.output), "model": os.getenv("PARASAIL_CHAT_MODEL"),
@@ -223,10 +250,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send(500, {"error": describe_error(exc)})
 
     def do_POST(self):
+        # Read the (small, capped) body before answering: replying first makes Windows abort the connection.
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > 65536:
+            return self.send(413, {"error": "request too large"})
+        raw = self.rfile.read(length)
+        if not self.trusted(write=True):
+            return self.send(403, {"error": "forbidden: cross-site or missing dashboard token"})
         if urlparse(self.path).path != "/api/start":
             return self.send(404, {"error": "not found"})
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            body = json.loads(raw or b"{}")
             scenario = body.get("scenario")
             if scenario not in SCENARIOS:
                 raise ValueError("Unknown scenario")

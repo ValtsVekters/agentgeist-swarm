@@ -45,5 +45,32 @@ def server():
     {"kind": "fixture", "scenario": "../../etc"},                                                      # unknown scenario
 ])
 def test_start_refuses_unconfirmed_or_invalid_runs(server, body):
-    response = httpx.post(server + "/api/start", json=body)
+    response = httpx.post(server + "/api/start", json=body, headers={"X-Agentgeist-Token": dashboard.TOKEN})
     assert response.status_code == 400 and dashboard.RUNNER.current is None
+
+
+VALID = {"kind": "live", "team": "agentgeist-test9", "scenario": "outbreak-level-5", "confirm": "LIVE"}
+
+
+@pytest.mark.parametrize("headers", [
+    {},                                                                       # no token: another site cannot know it
+    {"X-Agentgeist-Token": "guess"},                                          # wrong token
+    {"X-Agentgeist-Token": dashboard.TOKEN, "Origin": "https://evil.example"},  # cross-site page
+    {"X-Agentgeist-Token": dashboard.TOKEN, "Host": "evil.example:8765"},     # DNS rebinding
+])
+def test_start_refuses_cross_site_and_rebinding_requests(server, headers):
+    response = httpx.post(server + "/api/start", json=VALID, headers=headers)
+    assert response.status_code == 403 and dashboard.RUNNER.current is None
+
+
+def test_start_refuses_form_posts_even_with_token(server):
+    # A plain form or text/plain fetch skips the browser's CORS preflight, so it must be refused.
+    response = httpx.post(server + "/api/start", content=json.dumps(VALID),
+                          headers={"Content-Type": "text/plain", "X-Agentgeist-Token": dashboard.TOKEN})
+    assert response.status_code == 403
+
+
+def test_reads_refuse_foreign_host_and_page_carries_token(server):
+    assert httpx.get(server + "/api/runs", headers={"Host": "evil.example:8765"}).status_code == 403
+    page = httpx.get(server + "/")
+    assert page.status_code == 200 and dashboard.TOKEN in page.text and page.headers["X-Frame-Options"] == "DENY"

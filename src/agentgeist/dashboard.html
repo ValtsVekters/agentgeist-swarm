@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agentgeist Dashboard</title>
+<meta name="agentgeist-token" content="__AGENTGEIST_TOKEN__">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"
         integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"
@@ -208,7 +209,8 @@ async function openRun(id){
   show("summary.md" in data?"summary.md":names[0]);
 }
 async function start(body){
-  try{await api("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const token=document.querySelector('meta[name="agentgeist-token"]').content;
+  try{await api("/api/start",{method:"POST",headers:{"Content-Type":"application/json","X-Agentgeist-Token":token},body:JSON.stringify(body)});
     $("#feed").innerHTML=`<div class="empty">Starting…</div>`;$("#banner").innerHTML="";seenOutput.clear();pollStatus()}
   catch(e){alert("Could not start: "+e.message)}
 }
