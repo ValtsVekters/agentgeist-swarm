@@ -26,7 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
-from .contracts import team_handle
+from .contracts import Tick, safety_floor, team_handle
+from .scenarios import random_tick
 
 SCENARIOS = ("outbreak-level-5", "control-tick")
 LIVE_EVENTS = ("decision", "judgment", "discord_receipt", "escalation_pending", "escalation_skipped", "tick_failed",
@@ -76,19 +77,51 @@ def without_email(enabled):
     return env
 
 
-def run_fixture(scenario, email):
-    from .main import RunOptions, execute
+def saved_tick(scenario, index):
+    data = json.loads(files("agentgeist").joinpath("fixtures", scenario + ".json").read_text(encoding="utf-8"))
+    tick = Tick.model_validate(data["ticks"][index])
+    return tick, safety_floor(tick).action, None
+
+
+def random_ticks(count, seed):
+    seed = secrets.randbelow(10**6) if seed is None else seed
+    return [(*random_tick(seed + i), seed + i) for i in range(count)]
+
+
+def run_ticks(ticks, email):
+    """Run (tick, expected, seed) items through the warmed swarm like `kickoff`: never submitted or posted.
+    Each result compares the commander's own proposal with the fixed rule the venue referee uses."""
+    from .budget import Ledger
+    from .connections import describe_error
+    from .report import email_report
+    from .swarm import run_swarm, warm_up
+    warm_up()
     saved = os.environ.get("AGENTGEIST_REPORT_EMAIL")
     if not email:
         os.environ.pop("AGENTGEIST_REPORT_EMAIL", None)
+    results = []
     try:
-        result = execute(RunOptions(mode="fixture", scenario=scenario))
+        for tick, expected, seed in ticks:
+            row = {"tick": tick.tick_id, "seed": seed, "expected": expected, "sectors": len(tick.sector_reports)}
+            try:
+                result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
+                folder = Path(result["log_dir"]) if result.get("log_dir") else None
+                run = json.loads((folder / "run.json").read_text(encoding="utf-8")) if folder else {}
+                mail = email_report(result.get("log_dir"))
+                row.update(proposed=result["proposed"]["action"], action=result["decision"]["action"],
+                           override=result["supervisor_override"], seconds=run.get("swarm_seconds"),
+                           log=folder.name if folder else None, email=mail["status"] if mail else "off",
+                           matched=result["proposed"]["action"] == expected)
+            except Exception as exc:
+                row.update(error=describe_error(exc), matched=False)
+            results.append(row)
     finally:
         if saved is not None:
             os.environ["AGENTGEIST_REPORT_EMAIL"] = saved
-    run = json.loads((Path(result["log_dir"]) / "run.json").read_text(encoding="utf-8")) if result.get("log_dir") else {}
-    return {"ok": True, "action": result["decision"]["action"], "seconds": run.get("swarm_seconds"),
-            "log": Path(result["log_dir"]).name if result.get("log_dir") else None, "email": result.get("email_report")}
+    last = results[-1]
+    return {"ok": "error" not in last, "action": last.get("action"), "seconds": last.get("seconds"),
+            "log": last.get("log"), "email": last.get("email"), "results": results,
+            "matched": sum(r["matched"] for r in results), "total": len(results)}
 
 
 def run_live(team, scenario, submit, discord, email):
@@ -261,13 +294,26 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "not found"})
         try:
             body = json.loads(raw or b"{}")
+            kind, email = body.get("kind"), bool(body.get("email"))
+            if kind == "random":
+                count, seed = int(body.get("count", 1)), body.get("seed")
+                if not 1 <= count <= 10:
+                    raise ValueError("Run 1 to 10 random ticks at a time")
+                seed = None if seed in (None, "") else int(seed)
+                ticks = random_ticks(count, seed)
+                label = f"Random tick{'s' if count > 1 else ''} (seed {ticks[0][2]}{f'..{ticks[-1][2]}' if count > 1 else ''})"
+                RUNNER.start("random", label, lambda: run_ticks(ticks, email))
+                return self.send(200, {"started": True})
             scenario = body.get("scenario")
             if scenario not in SCENARIOS:
                 raise ValueError("Unknown scenario")
-            email = bool(body.get("email"))
-            if body.get("kind") == "fixture":
-                RUNNER.start("fixture", f"Test tick: {scenario}", lambda: run_fixture(scenario, email))
-            elif body.get("kind") == "live":
+            if kind == "fixture":
+                index = int(body.get("index", 0))
+                if index not in (0, 1) or (scenario == "control-tick" and index != 0):
+                    raise ValueError("Unknown saved tick")
+                ticks = [saved_tick(scenario, index)]
+                RUNNER.start("fixture", f"Saved tick {ticks[0][0].tick_id}", lambda: run_ticks(ticks, email))
+            elif kind == "live":
                 if body.get("confirm") != "LIVE":
                     raise ValueError("Live runs need explicit confirmation")
                 team = team_handle(body.get("team", ""))

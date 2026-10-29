@@ -73,18 +73,29 @@ def civilian_risk(status: str) -> bool:
     )
 
 
+def physical_anomaly(sector: Sector) -> bool:
+    s = sector.sensors
+    return sum((s.emf_milligauss >= 60, s.temp_c <= 5, s.motion_events >= 10)) >= 2
+
+
+def credible_sighting(sector: Sector) -> bool:
+    s = sector.sighting
+    return bool(s and s.confidence >= .65 and s.witness_count >= 2
+                and s.entity_class not in ("human-crowd", "residual-echo"))
+
+
+def breached(sector: Sector) -> bool:
+    return sector.containment_state == "breached"
+
+
 def safety_floor(tick: Tick) -> Decision:
     """Transparent simulation policy. Research cannot override physical danger."""
     threats = []
     for s in tick.sector_reports:
-        physical = sum((s.sensors.emf_milligauss >= 60, s.sensors.temp_c <= 5,
-                        s.sensors.motion_events >= 10)) >= 2
-        credible = bool(s.sighting and s.sighting.confidence >= .65
-                        and s.sighting.witness_count >= 2
-                        and s.sighting.entity_class not in ("human-crowd", "residual-echo"))
-        if civilian_risk(s.civilian_status) and (physical or credible or s.containment_state == "breached"):
+        physical, credible = physical_anomaly(s), credible_sighting(s)
+        if civilian_risk(s.civilian_status) and (physical or credible or breached(s)):
             return Decision(action="evacuate", rationale=f"{s.sector}: civilians at risk; isolate the sector and evacuate.")
-        if physical and (credible or s.containment_state == "breached"):
+        if physical and (credible or breached(s)):
             threats.append(s.sector)
     if threats:
         return Decision(action="contain", rationale="Corroborated threat in " + ", ".join(threats))

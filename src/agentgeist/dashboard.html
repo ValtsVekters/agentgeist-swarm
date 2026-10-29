@@ -79,12 +79,17 @@ table.sb tr.me td{font-weight:700;color:var(--accent)}
   <div class="stack">
     <section class="panel">
       <h2>Test tick</h2>
-      <p class="note" style="margin:0 0 10px">Saved venue ticks with the real agents and partners. No submission, no Discord.</p>
+      <p class="note" style="margin:0 0 10px">Real agents and partners. Never submitted, never posted to Discord.</p>
       <div class="stack" style="gap:8px">
-        <button class="primary" data-fixture="outbreak-level-5">Run outbreak tick<small>Expected answer: evacuate</small></button>
-        <button class="primary" data-fixture="control-tick">Run false-alarm tick<small>Expected answer: observe</small></button>
+        <button class="primary" data-scenario="outbreak-level-5" data-index="0">Saved tick 142 — outbreak<small>Expected: evacuate</small></button>
+        <button class="primary" data-scenario="outbreak-level-5" data-index="1">Saved tick 143 — outbreak + decoy<small>Expected: evacuate</small></button>
+        <button class="primary" data-scenario="control-tick" data-index="0">Saved tick 900 — false alarm<small>Expected: observe</small></button>
       </div>
-      <div class="row"><input type="checkbox" id="fxEmail"><label for="fxEmail">Email the report through One</label></div>
+      <h2 style="margin-top:14px">Random ticks</h2>
+      <div class="row"><select id="rCount"><option>1</option><option>3</option><option selected>5</option><option>10</option></select>
+        <input type="text" id="rSeed" placeholder="seed (optional)"></div>
+      <button class="primary" id="random">Run random ticks<small>1–3 random sectors each; expected answer from the fixed rule</small></button>
+      <div class="row"><input type="checkbox" id="fxEmail"><label for="fxEmail">Email each report through One</label></div>
     </section>
     <section class="panel">
       <h2>Live tick</h2>
@@ -109,6 +114,7 @@ table.sb tr.me td{font-weight:700;color:var(--accent)}
       <h2>Live agents</h2>
       <div class="status"><span class="dot" id="dot"></span><span id="statusText">Idle</span></div>
       <div id="banner"></div>
+      <div id="results"></div>
       <div class="feed" id="feed"><div class="empty">Run a tick to watch the agents work.</div></div>
     </section>
     <section class="panel" id="detailPanel" hidden>
@@ -175,7 +181,7 @@ async function pollStatus(){
   $("#chips").innerHTML=[["Engine",s.warm],["Model",(s.model||"").replace("parasail-","")],["Discord",s.discord_transport],["Email",s.email?"on":"off"]]
     .map(([k,v])=>`<span class="chip">${k}: <b>${esc(v)}</b></span>`).join("");
   const was=running; running=!!s.running;
-  document.querySelectorAll("button[data-fixture],#live").forEach(b=>b.disabled=running||s.warm!=="ready");
+  document.querySelectorAll("button[data-scenario],#random,#live").forEach(b=>b.disabled=running||s.warm!=="ready");
   $("#dot").className="dot"+(running?" run":"");
   if(running){$("#statusText").textContent=`${s.running.label} — ${((Date.now()/1000)-s.running.started).toFixed(1)} s`}
   else if(s.warm!=="ready"){$("#statusText").textContent=`Engine ${s.warm}…`}
@@ -184,7 +190,22 @@ async function pollStatus(){
     :`Last: ${esc(l.label)} failed — ${esc(l.error&&(l.error.reason||l.error.type)||"see output")}`}
   else $("#statusText").textContent="Idle";
   s.output.forEach(addOutput);
+  showResults(s.last);
   if(was&&!running){await loadRuns(); if(s.last&&s.last.log) openRun(findRun(s.last.log))}
+}
+let shownResults="";
+function showResults(last){
+  const rows=last&&last.results; const key=rows?JSON.stringify(rows):"";
+  if(key===shownResults) return; shownResults=key;
+  if(!rows){$("#results").innerHTML="";return}
+  const ok=rows.filter(r=>r.matched).length, secs=rows.filter(r=>r.seconds).map(r=>r.seconds);
+  const avg=secs.length?(secs.reduce((a,b)=>a+b,0)/secs.length).toFixed(2):"–";
+  $("#results").innerHTML=`<div class="md" style="margin:10px 0"><b>Model matched the rule on ${ok}/${rows.length}</b> · average ${avg} s
+    <table><tr><th>Tick</th><th>Seed</th><th>Sectors</th><th>Expected</th><th>Model</th><th>Final</th><th>Time</th><th></th></tr>${rows.map(r=>
+    `<tr><td><a href="#" data-log="${esc(r.log||"")}">${esc(r.tick)}</a></td><td>${esc(r.seed??"saved")}</td><td>${esc(r.sectors)}</td><td>${esc(r.expected)}</td>
+    <td>${esc(r.proposed||"–")}</td><td>${esc(r.action||"–")}${r.override?" (override)":""}</td><td>${esc(r.seconds??"–")} s</td>
+    <td>${r.error?"⚠ "+esc(r.error.reason||r.error.type):r.matched?"✓":"✗"}</td></tr>`).join("")}</table></div>`;
+  document.querySelectorAll("#results a[data-log]").forEach(a=>a.onclick=async ev=>{ev.preventDefault();await loadRuns();openRun(findRun(a.dataset.log))});
 }
 let runsCache=[];
 function findRun(name){const r=runsCache.find(r=>r.id.endsWith(name));return r&&r.id}
@@ -214,7 +235,8 @@ async function start(body){
     $("#feed").innerHTML=`<div class="empty">Starting…</div>`;$("#banner").innerHTML="";seenOutput.clear();pollStatus()}
   catch(e){alert("Could not start: "+e.message)}
 }
-document.querySelectorAll("button[data-fixture]").forEach(b=>b.onclick=()=>start({kind:"fixture",scenario:b.dataset.fixture,email:$("#fxEmail").checked}));
+document.querySelectorAll("button[data-scenario]").forEach(b=>b.onclick=()=>start({kind:"fixture",scenario:b.dataset.scenario,index:+b.dataset.index,email:$("#fxEmail").checked}));
+$("#random").onclick=()=>start({kind:"random",count:+$("#rCount").value,seed:$("#rSeed").value.trim(),email:$("#fxEmail").checked});
 $("#live").onclick=()=>{
   const team=$("#team").value.trim(), sc=$("#scenario").value;
   const warnReal = team===myTeam ? "\n\n⚠ This is your REAL team handle: it counts for scoring." : "";

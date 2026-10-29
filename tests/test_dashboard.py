@@ -43,6 +43,9 @@ def server():
     {"kind": "live", "team": "agentgeist-test9", "scenario": "outbreak-level-5"},                      # no confirmation
     {"kind": "live", "team": "Bad Team!", "scenario": "outbreak-level-5", "confirm": "LIVE"},          # invalid handle
     {"kind": "fixture", "scenario": "../../etc"},                                                      # unknown scenario
+    {"kind": "fixture", "scenario": "control-tick", "index": 1},                                       # no such saved tick
+    {"kind": "random", "count": 0}, {"kind": "random", "count": 11},                                   # 1..10 only
+    {"kind": "random", "count": 1, "seed": "abc"},                                                     # seed must be a number
 ])
 def test_start_refuses_unconfirmed_or_invalid_runs(server, body):
     response = httpx.post(server + "/api/start", json=body, headers={"X-Agentgeist-Token": dashboard.TOKEN})
